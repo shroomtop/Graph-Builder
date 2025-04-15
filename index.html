@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RedOps Graph Builder v2.1 (Branching & Connecting)</title>
+  <style>
+    body {
+      margin: 0;
+      background: #121212;
+      font-family: 'Segoe UI', sans-serif;
+      color: white;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    h1 {
+      text-align: center;
+      background: #1e1e1e;
+      padding: 1rem;
+      margin: 0;
+      border-bottom: 2px solid #00bcd4;
+    }
+    #controls {
+      background: #1e1e1e;
+      padding: 1rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+      border-bottom: 1px solid #333;
+    }
+    button {
+      background-color: #00bcd4;
+      border: none;
+      color: white;
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+    button:hover {
+      background-color: #0097a7;
+    }
+    button.active-mode { /* Style for active mode button */
+        background-color: #FF9800; /* Orange indicating active mode */
+    }
+    button.active-mode:hover {
+        background-color: #F57C00;
+    }
+    #network {
+      flex: 1;
+      border-bottom: 1px solid #333;
+      position: relative;
+      overflow: hidden;
+      background: #1a1a1a; /* Slightly different background for contrast */
+    }
+    #info {
+      background: #1e1e1e;
+      padding: 1rem;
+      border-top: 1px solid #00bcd4;
+      min-height: 100px;
+      max-height: 200px;
+      overflow-y: auto;
+      box-sizing: border-box;
+      flex-shrink: 0;
+    }
+    #info strong {
+      color: #00e0ff;
+    }
+    #info span.instruction { /* Style for instructions */
+        color: #FFEB3B; /* Yellow instructions */
+        display: block;
+        margin-top: 5px;
+    }
+    #info textarea {
+      background: #191919;
+      color: white;
+      border: 1px solid #444;
+      padding: 0.5rem;
+      width: 100%;
+      margin-top: 0.5rem;
+      font-family: monospace;
+      box-sizing: border-box;
+      resize: vertical;
+      min-height: 60px;
+    }
+  </style>
+  <link href="https://unpkg.com/vis-network/styles/vis-network.min.css" rel="stylesheet" type="text/css" />
+</head>
+<body>
+  <h1>RedOps Graph Builder v2.1</h1>
+
+  <div id="controls">
+    <button id="add-tool-btn" onclick="addToolPrompt()">+ Add Tool</button>
+    <button id="connect-nodes-btn" onclick="toggleConnectMode()">Connect Nodes</button> <button onclick="saveGraph()">Save Graph</button>
+    <button onclick="loadGraph()">Load Graph</button>
+    <button onclick="exportPNG()">Export as PNG</button>
+    <button onclick="generateReport()">Generate Report</button>
+  </div>
+
+  <div id="network"></div>
+
+  <div id="info">
+      <span class="instruction">Click a node to select it. Click '+ Add Tool' to branch from selection (or root if none selected).</span>
+  </div>
+
+  <script type="module">
+    import { Network, DataSet } from "https://unpkg.com/vis-network/standalone/esm/vis-network.min.js";
+
+    const container = document.getElementById("network");
+    const info = document.getElementById("info");
+    const connectNodesBtn = document.getElementById('connect-nodes-btn');
+
+    // --- State Variables ---
+    let selectedNodeId = null;
+    let isConnectingMode = false;
+    let firstNodeToConnect = null;
+
+    const nodes = new DataSet([{ id: "RedOps", label: "RedOps Root", color: "#FF5733", fixed: true }]);
+    const edges = new DataSet([]);
+    const data = { nodes, edges };
+    const descriptions = {}; // Store descriptions separately
+
+    const options = {
+        nodes: {
+            shape: 'dot',
+            size: 16,
+            font: { size: 14, color: '#ffffff' },
+            borderWidth: 2,
+            color: { // Default colors
+                 border: '#2B7CE9', background: '#4E9DE0',
+                 highlight: { border: '#FF9800', background: '#FFB74D' }, // Highlight selection/connection source
+                 hover: { border: '#2B7CE9', background: '#87CEEB' }
+            }
+        },
+        edges: {
+            arrows: 'to', // Default to directed edges
+            color: {
+              color:'#00bcd4', highlight:'#00e0ff', hover: '#00e0ff', inherit: 'from', opacity:1.0
+            },
+            width: 2,
+            smooth: { enabled: true, type: "dynamic", roundness: 0.5 }
+        },
+        interaction: {
+            hover: true,
+            tooltipDelay: 200,
+            selectConnectedEdges: false // Don't select edges when node is clicked
+        },
+        manipulation: false, // Disable default manipulation UI, we use buttons
+        physics: { /* ... (keep previous physics settings) ... */
+            enabled: true, solver: 'forceAtlas2Based',
+            forceAtlas2Based: { gravitationalConstant: -50, centralGravity: 0.01, springLength: 100, springConstant: 0.08, damping: 0.4, avoidOverlap: 0.5 },
+            stabilization: { iterations: 1000, updateInterval: 50, onlyDynamicEdges: false, fit: true },
+            timestep: 0.5
+        },
+        layout: { hierarchical: false }
+    };
+
+    const network = new Network(container, data, options);
+
+    // --- Helper Function to Defer Execution ---
+    function deferExecution(func) {
+        setTimeout(func, 0);
+    }
+
+    // --- Update Info Panel Function ---
+    function updateInfoPanel(htmlContent) {
+        info.innerHTML = htmlContent;
+    }
+
+    function showDefaultInstructions() {
+        updateInfoPanel('<span class="instruction">Click a node to select it. Click \'+ Add Tool\' to branch from selection (or root if none selected). Use \'Connect Nodes\' mode to link existing nodes.</span>');
+    }
+
+    // --- Global Functions for Buttons ---
+
+    window.addToolPrompt = () => {
+      // Ensure not in connecting mode when adding tool
+      if (isConnectingMode) {
+          alert("Please exit 'Connect Nodes' mode first (click the button again).");
+          return;
+      }
+
+      const sourceNodeId = selectedNodeId || "RedOps"; // Default to root if nothing selected
+      const sourceNodeLabel = nodes.get(sourceNodeId)?.label || sourceNodeId;
+
+      const toolName = prompt(`Enter Tool Name (will connect from ${sourceNodeLabel}):`);
+      if (!toolName || toolName.trim() === "") {
+        // alert("Tool name cannot be empty."); // Prompt implicitly handles cancellation
+        return;
+      }
+      if (nodes.get(toolName)) {
+         alert(`Tool "${toolName}" already exists.`);
+         return;
+      }
+
+      const description = prompt(`Enter Description for ${toolName}:`);
+       if (description === null) return; // User cancelled description prompt
+
+      try {
+        nodes.add({ id: toolName, label: toolName }); // Add the new node
+        edges.add({ from: sourceNodeId, to: toolName }); // Add edge from selected/root
+        descriptions[toolName] = description || "No description provided."; // Store description
+
+        // Select the newly added node
+        selectedNodeId = toolName;
+        network.selectNodes([selectedNodeId]);
+        updateInfoPanel(`<strong>${toolName}:</strong><br/><textarea readonly rows='5'>${descriptions[toolName]}</textarea><span class="instruction">Added node '${toolName}' branching from '${sourceNodeLabel}'.</span>`);
+
+
+        // Defer fitting to potentially avoid resize observer loops
+        deferExecution(() => network.fit({ nodes: [sourceNodeId, toolName], animation: true }));
+
+      } catch (e) {
+          alert(`Error adding tool: ${e.message}`);
+          console.error("Error adding tool:", e);
+      }
+    };
+
+    window.toggleConnectMode = () => {
+        isConnectingMode = !isConnectingMode;
+        firstNodeToConnect = null; // Reset selection on mode toggle
+
+        if (isConnectingMode) {
+            connectNodesBtn.textContent = 'Cancel Connection';
+            connectNodesBtn.classList.add('active-mode');
+            network.unselectAll(); // Unselect any nodes visually
+            selectedNodeId = null; // Clear logical selection
+            updateInfoPanel('<span class="instruction">CONNECT MODE: Click the first node (source).</span>');
+        } else {
+            connectNodesBtn.textContent = 'Connect Nodes';
+            connectNodesBtn.classList.remove('active-mode');
+            showDefaultInstructions(); // Show normal instructions
+        }
+    };
+
+    window.saveGraph = () => { /* ... (keep previous saveGraph function) ... */
+      try {
+        const state = {
+          nodes: nodes.get({ returnType: "Array" }),
+          edges: edges.get({ returnType: "Array" }),
+          descriptions: descriptions
+        };
+        localStorage.setItem("redops_graph_v2.1", JSON.stringify(state)); // Use new key
+        alert("Graph saved successfully.");
+      } catch (e) {
+          alert(`Error saving graph: ${e.message}`);
+          console.error("Error saving graph:", e);
+      }
+    };
+
+    window.loadGraph = () => { /* ... (keep previous loadGraph function, update key) ... */
+      if (isConnectingMode) toggleConnectMode(); // Exit connect mode if active
+      const raw = localStorage.getItem("redops_graph_v2.1"); // Use new key
+      if (!raw) {
+        alert("No saved graph found.");
+        return;
+      }
+      try {
+        const state = JSON.parse(raw);
+        nodes.clear();
+        edges.clear();
+        Object.keys(descriptions).forEach(key => delete descriptions[key]);
+        selectedNodeId = null; // Reset selection
+
+        nodes.add(state.nodes);
+        edges.add(state.edges);
+        Object.assign(descriptions, state.descriptions);
+
+        alert("Graph loaded successfully.");
+        showDefaultInstructions();
+
+        deferExecution(() => network.fit({ animation: true }));
+      } catch (e) {
+        alert(`Error loading graph: ${e.message}. Saved data might be corrupted.`);
+        console.error("Error loading graph:", e);
+      }
+    };
+
+    window.exportPNG = () => { /* ... (keep previous exportPNG function) ... */
+       try {
+           const canvas = container.getElementsByTagName("canvas")[0];
+           if (!canvas) {
+               alert("Could not find the canvas element to export."); return;
+           }
+           const dataURL = canvas.toDataURL("image/png");
+           const link = document.createElement("a");
+           link.download = "redops_graph.png";
+           link.href = dataURL;
+           document.body.appendChild(link); link.click(); document.body.removeChild(link);
+       } catch (e) {
+           alert(`Error exporting PNG: ${e.message}`); console.error("Error exporting PNG:", e);
+       }
+    };
+
+    window.generateReport = () => { /* ... (keep previous generateReport function) ... */
+      try {
+          let report = "# RedOps Graph Report\n\n";
+          const allNodes = nodes.get({ returnType: "Array" });
+          if (allNodes.length === 0) { report += "Graph is empty.\n"; }
+          else {
+              allNodes.sort((a, b) => { /* ... sort logic ... */ });
+              for (const node of allNodes) { /* ... report generation ... */ }
+          }
+          const blob = new Blob([report], { type: "text/markdown;charset=utf-8" });
+          /* ... link creation and click ... */
+      } catch (e) {
+           alert(`Error generating report: ${e.message}`); console.error("Error generating report:", e);
+      }
+    };
+
+
+    // --- Network Event Listeners ---
+
+    network.on("click", params => {
+      const clickedNodeId = params.nodes.length > 0 ? params.nodes[0] : null;
+      const clickedOnEmpty = !clickedNodeId;
+
+      if (isConnectingMode) {
+          // --- Connecting Mode Logic ---
+          if (clickedNodeId) {
+              if (firstNodeToConnect === null) {
+                  // First node selected
+                  firstNodeToConnect = clickedNodeId;
+                  network.selectNodes([firstNodeToConnect]); // Visually select
+                  const nodeLabel = nodes.get(firstNodeToConnect)?.label || firstNodeToConnect;
+                  updateInfoPanel(`<span class="instruction">CONNECT MODE: Selected '${nodeLabel}' as source. Click the second node (target).</span>`);
+              } else {
+                  // Second node selected
+                  if (firstNodeToConnect === clickedNodeId) {
+                      // Clicked the same node again - cancel selection
+                      firstNodeToConnect = null;
+                      network.unselectAll();
+                      updateInfoPanel('<span class="instruction">CONNECT MODE: Source node selection cancelled. Click the first node (source).</span>');
+                  } else {
+                      // Valid second node - try to add edge
+                      const secondNodeId = clickedNodeId;
+                      const sourceLabel = nodes.get(firstNodeToConnect)?.label || firstNodeToConnect;
+                      const targetLabel = nodes.get(secondNodeId)?.label || secondNodeId;
+
+                      // Check if edge already exists (in either direction)
+                      const existingEdges = edges.get({
+                          filter: function (edge) {
+                              return (edge.from === firstNodeToConnect && edge.to === secondNodeId) ||
+                                     (edge.from === secondNodeId && edge.to === firstNodeToConnect);
+                          }
+                      });
+
+                      if (existingEdges.length > 0) {
+                          alert(`Connection between '${sourceLabel}' and '${targetLabel}' already exists.`);
+                      } else {
+                          try {
+                              edges.add({ from: firstNodeToConnect, to: secondNodeId });
+                              updateInfoPanel(`<span class="instruction">CONNECT MODE: Connected '${sourceLabel}' to '${targetLabel}'. Click first node for next connection.</span>`);
+                          } catch (e) {
+                              alert(`Error adding connection: ${e.message}`);
+                              console.error("Error adding edge:", e);
+                          }
+                      }
+                      // Reset for next connection attempt
+                      firstNodeToConnect = null;
+                      network.unselectAll();
+                      // Keep mode active until cancelled - uncomment line below to exit mode after each connection
+                      // toggleConnectMode();
+                  }
+              }
+          } else {
+              // Clicked on empty space - cancel selection
+              firstNodeToConnect = null;
+              network.unselectAll();
+              updateInfoPanel('<span class="instruction">CONNECT MODE: Selection cancelled. Click the first node (source).</span>');
+          }
+      } else {
+          // --- Normal Mode Logic ---
+          if (clickedNodeId) {
+              selectedNodeId = clickedNodeId; // Update selected node
+              const nodeLabel = nodes.get(selectedNodeId)?.label || selectedNodeId;
+              const desc = descriptions[selectedNodeId] || "No description available.";
+              // Don't use network.selectNodes here if you want the default highlight behaviour only
+              // network.selectNodes([selectedNodeId]); // Explicitly select if needed
+              updateInfoPanel(`<strong>${nodeLabel} (ID: ${selectedNodeId}):</strong><br/><textarea readonly rows='5'>${desc}</textarea><span class="instruction">Node selected. Click '+ Add Tool' to branch.</span>`);
+          } else {
+              selectedNodeId = null; // Clear selection
+              network.unselectAll(); // Visually unselect
+              showDefaultInstructions();
+          }
+      }
+    });
+
+    // --- Initial Setup ---
+    showDefaultInstructions(); // Show initial help text
+    // Optional: Load graph on initial page load if available
+    // deferExecution(() => window.loadGraph());
+
+  </script>
+</body>
+</html>
